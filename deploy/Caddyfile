@@ -1,0 +1,4 @@
+{$LUMINEXT_DOMAIN} {
+    reverse_proxy cloud:8000
+    encode zstd gzip
+}

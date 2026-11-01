@@ -1,0 +1,5 @@
+-r requirements.txt
+openvino>=2025.0,<2027
+numpy>=2,<3
+opencv-python-headless>=4.10,<5
+imageio-ffmpeg==0.6.0; sys_platform == "win32"

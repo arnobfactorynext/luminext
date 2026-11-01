@@ -1,0 +1,12 @@
+{
+  "person-detection-retail-0013.xml": {
+    "source": "https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/person-detection-retail-0013/FP16/person-detection-retail-0013.xml",
+    "sha256": "19556695d2b18255fe5593d388ae69ba7f9a2f5c3f986bde8356741d0db26e89",
+    "bytes": 571233
+  },
+  "person-detection-retail-0013.bin": {
+    "source": "https://storage.openvinotoolkit.org/repositories/open_model_zoo/2023.0/models_bin/1/person-detection-retail-0013/FP16/person-detection-retail-0013.bin",
+    "sha256": "cf4a1f2f252d229966001e15454c5ba02a7ace047b181b235e3a2c4aebcf3ba7",
+    "bytes": 1445734
+  }
+}

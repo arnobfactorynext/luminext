@@ -1,0 +1,35 @@
+services:
+  cloud:
+    build:
+      context: .
+      target: controller
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8001:8000"
+    environment:
+      LUMINEXT_MODE: cloud
+      LUMINEXT_SECURE_COOKIES: "1"
+    volumes:
+      - cloud-data:/data
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    profiles: [https]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      LUMINEXT_DOMAIN: ${LUMINEXT_DOMAIN:?Set LUMINEXT_DOMAIN to the cloud console DNS name}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [cloud]
+volumes:
+  cloud-data:
+  caddy-data:
+  caddy-config:

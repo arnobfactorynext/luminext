@@ -1,0 +1,60 @@
+services:
+  controller:
+    build:
+      context: .
+      target: controller
+    restart: unless-stopped
+    ports:
+      - "${LUMINEXT_BIND:-127.0.0.1}:8000:8000"
+    volumes:
+      - controller-data:/data
+    environment:
+      LUMINEXT_MODE: edge
+      LUMINEXT_AUTOSTART_DETECTION: "0"
+      LUMINEXT_SECURE_COOKIES: ${LUMINEXT_SECURE_COOKIES:-0}
+      LUMINEXT_MEDIA_API: http://streaming:1984
+      LUMINEXT_MEDIA_RTSP: rtsp://streaming:8554
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+  detection:
+    build:
+      context: .
+      target: detection
+    profiles: [hardware]
+    restart: unless-stopped
+    depends_on:
+      controller:
+        condition: service_healthy
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:-109}"
+      - "${VIDEO_GID:-44}"
+    volumes:
+      - controller-data:/data:ro
+      - ./models:/models:ro
+    shm_size: 256mb
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+  streaming:
+    image: alexxit/go2rtc:1.9.9
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["cp /etc/luminext-media.yaml /config/go2rtc.yaml && exec go2rtc -config /config/go2rtc.yaml"]
+    environment:
+      LUMINEXT_MEDIA_IP: ${LUMINEXT_MEDIA_IP:-127.0.0.1}
+    ports:
+      - "${LUMINEXT_BIND:-127.0.0.1}:8555:8555/tcp"
+      - "${LUMINEXT_BIND:-127.0.0.1}:8555:8555/udp"
+    volumes:
+      - ./deploy/go2rtc.yaml:/etc/luminext-media.yaml:ro
+    tmpfs:
+      - /config:size=8m,mode=0700
+    logging:
+      driver: none
+volumes:
+  controller-data:

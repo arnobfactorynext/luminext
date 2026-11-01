@@ -1,0 +1,16 @@
+alias: Sewing floor lighting off
+mode: restart
+trigger:
+  - platform: state
+    entity_id: occupancy.cam_01
+    to: "off"
+condition:
+  - condition: state
+    entity_id: occupancy.cam_01
+    state: "off"
+action:
+  - service: switch.turn_off
+    target:
+      entity_id:
+        - switch.wall_01_1
+        - switch.wall_01_2

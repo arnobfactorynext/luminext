@@ -1,0 +1,11 @@
+api:
+  listen: ":1984"
+rtsp:
+  listen: ":8554"
+webrtc:
+  listen: ":8555"
+  candidates:
+    - ${LUMINEXT_MEDIA_IP}:8555
+log:
+  level: disabled
+streams: {}
