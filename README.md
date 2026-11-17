@@ -2,7 +2,9 @@
 
 LumiNext is a local camera occupancy and ESPHome lighting controller with a web application and a separate multi-site cloud console. The application source is in this folder. No Home Assistant, Frigate or MQTT broker is required to run it. The independent streaming service uses go2rtc.
 
-This is version 0.1.1, a working implementation for development and hardware commissioning. It is **not yet certified against the 12-camera / 5 fps / one-second latency target on the N95**. One real RTSP camera has now been verified end to end on the Windows development host; the owner also reports an ESPHome switch integrated successfully. Read [verification and remaining work](docs/STATUS.md) before commissioning physical loads.
+This is version 0.2.0, a working implementation for development and hardware commissioning. It is **not yet certified against the 12-camera / 5 fps / one-second latency target on the N95**. One real RTSP camera was verified end to end on the Windows development host in version 0.1.1; the owner also reports an ESPHome switch integrated successfully. Read [verification and remaining work](docs/STATUS.md) before commissioning physical loads.
+
+**New in 0.2:** persistent friendly entity names, camera YAML editor, visible logout, independent configurable live preview with person boxes, broader ESPHome sensor/control discovery, and observed runtime/energy estimates against a configured baseline. See the [0.2 usage guide](docs/V0_2_GUIDE.md) for all changes, examples and limitations. The latest suite has 34 passing tests; the physical camera was unreachable during this update, so the new preview path still needs a camera-LAN check.
 
 ## Start on this Windows development PC
 
@@ -142,7 +144,7 @@ Docker containers restart on failure. The API and detection services are separat
 
 The streaming API and RTSP restream ports stay private to the Compose network. Go2rtc's runtime configuration is on tmpfs so stream credentials are not persisted as a plaintext configuration file. WebRTC signaling passes through the authenticated LumiNext API; media uses encrypted WebRTC on port 8555. Set the media IP to a reachable LAN/overlay address and restrict the port to that network. No public STUN/TURN server is configured.
 
-The camera grid uses the two-fps shared JPEG fallback; camera detail offers **Play low-latency WebRTC** when go2rtc is configured. Browser codec, LAN ICE connectivity and H.265 support must be checked on the target devices. The cloud console deliberately does not relay or store video. Opening local video remotely requires reaching the local controller and WebRTC address over a private network/overlay.
+The camera grid uses a bounded latest-frame JPEG preview, targeting `live_fps` (default 10) independently of detection. Camera detail offers **Play low-latency WebRTC** when go2rtc is configured. Browser codec, LAN ICE connectivity and H.265 support must be checked on the target devices. The cloud console deliberately does not relay or store video. Opening local video remotely requires reaching the local controller and WebRTC address over a private network/overlay.
 
 Normal operation shares one upstream camera pull through go2rtc for detection and live viewing. While the media service is unavailable, detection falls back to the camera directly. Once the media service returns, the worker uses the restream again.
 

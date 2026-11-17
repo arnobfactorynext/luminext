@@ -1,0 +1,157 @@
+LUMINEXT - WINDOWS STARTUP AND LOCAL NETWORK GUIDE
+Verified: 4 November 2026
+Project folder: D:\LumiNext
+
+1. START THE LOCAL CONTROLLER (NORMAL DAILY USE)
+
+Open PowerShell and run these commands:
+
+    cd D:\LumiNext
+    .\.venv\Scripts\python.exe -m luminext --mode edge --host 127.0.0.1 --port 8000 --data D:\LumiNext\data
+
+Keep this PowerShell window open.
+Open this address in your browser:
+
+    http://127.0.0.1:8000
+
+Sign in with your existing local account (Arnob).
+Your saved cameras, ESPHome devices, mappings and automations load from the
+existing database. The detection worker starts automatically for configured
+enabled cameras. You do not need to start it separately.
+
+These direct Python commands work even when PowerShell blocks .ps1 scripts.
+Activating the virtual environment is not required.
+
+
+2. START THE CLOUD CONSOLE (OPTIONAL, SECOND WINDOW)
+
+Open a SECOND PowerShell window and run:
+
+    cd D:\LumiNext
+    .\.venv\Scripts\python.exe -m luminext --mode cloud --host 127.0.0.1 --port 8001 --data D:\LumiNext\data\cloud
+
+Keep this second window open. Open:
+
+    http://127.0.0.1:8001
+
+The cloud console has its own account and database. Seeing a separate login
+here does not mean your local data was deleted.
+
+For local camera detection and switch automation, the local controller on
+port 8000 must run. The cloud console alone cannot control LAN devices.
+
+If a cloud site says Offline, connect the local controller to that site:
+  a. Obtain the site's enrollment token when enrolling it in the cloud console.
+  b. On port 8000, open Settings > Cloud connection.
+  c. Cloud console URL: http://127.0.0.1:8001
+  d. Paste the site enrollment token and click Connect to cloud.
+  e. Keep both processes running and allow a few seconds to synchronize.
+
+Tokens are shown once at enrollment. An enrolled site that was never paired
+will stay offline until its matching token is configured on the controller.
+Saved pairing settings are reused on later starts.
+
+Running this cloud console on your laptop is local testing. It does not deploy
+the console to an Internet server.
+
+
+3. ACCESS LUMINEXT FROM ANOTHER DEVICE ON YOUR LOCAL NETWORK
+
+Use this command INSTEAD OF the local-controller command in section 1:
+
+    cd D:\LumiNext
+    .\.venv\Scripts\python.exe -m luminext --mode edge --host 0.0.0.0 --port 8000 --data D:\LumiNext\data
+
+Run only one controller on port 8000. If one is already running, stop it with
+Ctrl+C in its terminal before starting the LAN version.
+
+On this laptop you can still use:
+
+    http://127.0.0.1:8000
+
+On another phone or PC connected to the same LAN, use the laptop's LAN IPv4:
+
+    http://192.168.0.118:8000
+
+192.168.0.118 was this laptop's Wi-Fi address when this guide was written.
+It may change. Run ipconfig and find the IPv4 Address of your active Wi-Fi or
+Ethernet adapter, then substitute that address in the URL.
+Do not enter 0.0.0.0 in the browser; it is the server's listening setting.
+
+If the laptop works but other LAN devices cannot connect:
+  - Confirm both devices are on the same LAN, not an isolated guest network.
+  - For your trusted home/office LAN, check Windows Settings > Network &
+    Internet > your Wi-Fi/Ethernet connection > Network profile type: Private.
+  - If Windows Firewall blocks the port, open PowerShell as Administrator
+    and add this rule for Private networks and local-subnet clients:
+
+    New-NetFirewallRule -DisplayName "LumiNext LAN 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -Profile Private -RemoteAddress LocalSubnet
+
+The rule applies only while that network is classified Private. The current
+Wi-Fi profile was Public when this guide was written; review its trust level
+before changing it. No firewall or network-profile changes were made as part
+of writing this guide.
+
+If you also want the cloud console accessible to LAN devices, use this command
+in the second terminal INSTEAD OF section 2:
+
+    cd D:\LumiNext
+    .\.venv\Scripts\python.exe -m luminext --mode cloud --host 0.0.0.0 --port 8001 --data D:\LumiNext\data\cloud
+
+Then open http://192.168.0.118:8001 on the other LAN device, substituting the
+current laptop IPv4 address if different. If required, add a second Private
+firewall rule using the same command above with port/name 8001 instead of 8000.
+The controller and console on this same laptop can continue pairing through
+http://127.0.0.1:8001.
+
+
+4. STOPPING AND RESTARTING
+
+To stop a service, press Ctrl+C in its PowerShell window.
+Shutting down or restarting Windows stops both services.
+After turning the laptop on again, repeat section 1, and section 2 if needed.
+These commands do not install automatic startup or a Windows service.
+The laptop must stay powered on and awake while it is the local controller.
+
+
+5. AVOID STARTING AN EMPTY OR DIFFERENT INSTALLATION
+
+Always use these data locations:
+
+    Local controller: D:\LumiNext\data
+    Cloud console:   D:\LumiNext\data\cloud
+
+Keep luminext.db and encryption.key together in their original data folder.
+Do not delete the data folder to fix startup issues. For a file-copy backup,
+stop the services first and copy the complete data folder.
+
+If you unexpectedly see first-account setup, check the port, mode and --data
+argument before creating another account.
+
+
+6. QUICK CHECKS
+
+Local health: http://127.0.0.1:8000/healthz
+Expected mode: edge
+
+Cloud health: http://127.0.0.1:8001/healthz
+Expected mode: cloud
+
+If you see "address already in use", the port may already have a running
+service. Try its browser address before launching another instance.
+
+For camera-worker errors, check:
+
+    D:\LumiNext\data\detection.log
+
+Cameras and ESPHome devices must be reachable from the laptop's network.
+
+
+VERIFICATION PERFORMED FOR THIS GUIDE
+
+The original local controller was already running and responded successfully
+on 127.0.0.1:8000 with mode edge. The cloud console was started from the terminal
+on 127.0.0.1:8001 using its existing data folder, and its health was checked.
+Both ports were kept on loopback for this startup. The LAN commands above are
+provided for your later LAN startup; LAN reachability from another device has
+not been tested in this session.

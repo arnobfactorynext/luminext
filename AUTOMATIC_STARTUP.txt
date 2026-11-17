@@ -1,0 +1,89 @@
+LUMINEXT AUTOMATIC STARTUP ON WINDOWS
+
+This uses Windows Task Scheduler as a background startup task, rather than a
+Windows Service. No terminal window is needed. It starts 30 seconds after boot,
+before login, and retries after a process failure (one minute, up to 999 retries).
+Sleep/hibernation still pauses the PC and therefore detection and automation.
+
+ONE-TIME INSTALLATION
+1. Stop any manually started LumiNext controllers with Ctrl+C.
+2. Open Windows PowerShell using Run as administrator.
+3. Run this command:
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\LumiNext\install-autostart.ps1" -IncludeCloud
+
+The execution-policy bypass applies only to that invocation; it does not change
+your permanent policy. Omit -IncludeCloud if you only want the local controller.
+The installer starts the tasks immediately as well as enabling startup at boot.
+
+4. Open http://127.0.0.1:8000/healthz and http://127.0.0.1:8001/healthz.
+   Expect status ok. Your normal dashboard is http://127.0.0.1:8000.
+5. Restart Windows once and check the dashboard again after about one minute.
+
+EXISTING DATA AND NETWORK
+The local task uses D:\LumiNext\data; cloud uses D:\LumiNext\data\cloud.
+Do not move the project or delete its .venv, database, or encryption.key files.
+These tasks run as SYSTEM and use loopback addresses, just like start.ps1.
+LAN access is not enabled by this installer. See HOW_TO_START_LUMINEXT.txt.
+Do not run start.ps1 or start-cloud.ps1 while these tasks are running.
+
+MANAGE TASKS (ADMINISTRATOR POWERSHELL)
+Check status:
+Get-ScheduledTask -TaskName 'LumiNext-*'
+
+Stop temporarily (tasks will start again at the next boot):
+Stop-ScheduledTask -TaskName LumiNext-edge
+Stop-ScheduledTask -TaskName LumiNext-cloud
+
+Start again:
+Start-ScheduledTask -TaskName LumiNext-edge
+Start-ScheduledTask -TaskName LumiNext-cloud
+
+Disable automatic startup and stop:
+Disable-ScheduledTask -TaskName LumiNext-edge
+Disable-ScheduledTask -TaskName LumiNext-cloud
+Stop-ScheduledTask -TaskName LumiNext-edge
+Stop-ScheduledTask -TaskName LumiNext-cloud
+
+Remove tasks entirely (does not delete application data):
+Unregister-ScheduledTask -TaskName LumiNext-edge -Confirm:$false
+Unregister-ScheduledTask -TaskName LumiNext-cloud -Confirm:$false
+
+Task Scheduler > Task Scheduler Library contains LumiNext-edge/LumiNext-cloud.
+Check Last Run Result there if startup fails; detection logs remain in
+D:\LumiNext\data\detection.log. Task termination may interrupt in-flight actions;
+use normal Windows shutdown and avoid stopping during configuration writes.
+
+Installation must be run as administrator. The installer was syntax-checked;
+boot startup must be verified on this PC after installing and restarting.
+
+
+ALTERNATIVE: PM2 (INSTALLED ON THIS PC, 8 NOVEMBER 2026)
+Use EITHER pm2 OR the Task Scheduler installer above, never both.
+pm2 runs both controllers from ecosystem.config.js (edge 8000, cloud 8001,
+same data folders as above), restarts them within ~5 seconds after a crash,
+and the LumiNext-pm2 logon task runs tools\pm2-resurrect.ps1 ~30 seconds
+after you sign in. It checks /healthz and, if pm2 hangs (a known Windows race
+that can start two pm2 daemons), clears stray pm2 processes and retries up to
+5 times. Each attempt is logged in D:\LumiNext\data\pm2-startup.log. Unlike the SYSTEM tasks above, it starts at sign-in, not at boot;
+enable automatic Windows sign-in if the PC must recover unattended.
+
+Setup (already done; repeat only on a new machine, no administrator needed):
+  winget install OpenJS.NodeJS.LTS
+  npm install -g pm2
+  cd D:\LumiNext
+  pm2 start ecosystem.config.js
+  pm2 save
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-pm2-startup.ps1
+
+Daily commands:
+  pm2 status                    pm2 logs luminext-edge
+  pm2 restart luminext-edge     pm2 stop luminext-cloud
+  pm2 monit
+Run "pm2 save" after starting/stopping apps you want remembered at next sign-in.
+pm2 stop/restart force-kills the process tree (including the camera worker);
+avoid it during configuration writes.
+
+Remove pm2 startup:
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-pm2-startup.ps1 -Uninstall
+  pm2 delete all; pm2 save

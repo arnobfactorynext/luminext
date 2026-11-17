@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -18,6 +19,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from .rules import RuleError, parse_rule
 from .media import MediaService
+from .camera_config import export_cameras, parse_cameras
+from .energy import EnergyProfile
 from .runtime import Runtime
 from .store import Store, check_password, now, password_hash, uid
 
@@ -56,6 +59,7 @@ class CameraInput(BaseModel):
     simulated: bool = False
     enabled: bool = True
     fps: float = Field(default=5, ge=1, le=15)
+    live_fps: int = Field(default=10, ge=1, le=20)
     width: int = Field(default=640, ge=160, le=1920, multiple_of=2)
     height: int = Field(default=360, ge=120, le=1080, multiple_of=2)
     threshold: float = Field(default=.5, ge=.05, le=1)
@@ -95,9 +99,18 @@ class MappingInput(BaseModel):
     occupancy_sources: list[str] = Field(max_length=100)
 
 
+class CameraYamlInput(BaseModel):
+    yaml: str = Field(max_length=300_000)
+
+
+class EntityNameInput(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
 class Detection(BaseModel):
     box: tuple[float, float, float, float]
     score: float = Field(ge=0, le=1)
+    track_id: int | None = Field(default=None, ge=1)
 
     @field_validator("box")
     @classmethod
@@ -129,7 +142,7 @@ def create_app(directory=None, mode=None):
         await rt.stop()
         store.db.close()
 
-    app = FastAPI(title="LumiNext", version="0.1.1", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="LumiNext", version="0.2.1", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.rt = rt
 
     @app.middleware("http")
@@ -276,7 +289,7 @@ def create_app(directory=None, mode=None):
     async def save_camera(body, actor):
         id = ensure_id(body.id or uid("cam"))
         previous = store.get("camera", id, {})
-        data = body.model_dump()
+        data = body.model_dump(mode="json")
         if len({z["id"] for z in data["zones"]}) != len(data["zones"]):
             raise ValueError("Zone IDs must be unique")
         if body.rtsp_url and urlsplit(body.rtsp_url).scheme not in {"rtsp", "rtsps"}:
@@ -286,6 +299,8 @@ def create_app(directory=None, mode=None):
         if len(store.all("camera")) >= 32 and not previous:
             raise ValueError("This installation supports at most 32 cameras")
         data.update(id=id, rtsp_url=store.seal(body.rtsp_url) if body.rtsp_url is not None else previous.get("rtsp_url", ""))
+        if previous == data and f"occupancy.{id}" in rt.entities:
+            return {"id":id,"unchanged":True}
         # Do not allow removing entities still referenced by rules or override mappings.
         new_ids = {f"occupancy.{id}"} | {f"occupancy.{id}_{z['id']}" for z in data["zones"]}
         if any(entity_id in rt.entities and rt.entities[entity_id].get("camera_id") != id for entity_id in new_ids):
@@ -316,6 +331,84 @@ def create_app(directory=None, mode=None):
     async def cameras_save(body: CameraInput, u=Depends(admin)):
         edge_only()
         return await save_camera(body, u["username"])
+
+    def prepare_cameras(text):
+        existing = {c["id"]:c for c in store.all("camera")}
+        candidates = parse_cameras(text, existing, CameraInput)
+        proposed = {id:e for id,e in rt.entities.items() if e.get("camera_id") not in {c.id for c in candidates}}
+        for camera in candidates:
+            ids = {f"occupancy.{camera.id}"} | {f"occupancy.{camera.id}_{z.id}" for z in camera.zones}
+            if ids & set(proposed):
+                raise ValueError("Camera/zone entity IDs collide")
+            assert_unreferenced({id for id,e in rt.entities.items() if e.get("camera_id")==camera.id}-ids)
+            for id in ids:
+                proposed[id] = {"camera_id":camera.id}
+        return candidates
+
+    @app.get("/api/cameras/config")
+    async def camera_yaml_get(u=Depends(admin)):
+        edge_only()
+        return {"yaml":export_cameras(store.all("camera"))}
+
+    @app.post("/api/cameras/config/validate")
+    async def camera_yaml_validate(body: CameraYamlInput, u=Depends(admin)):
+        edge_only()
+        result = prepare_cameras(body.yaml)
+        return {"valid":True,"cameras":[c.id for c in result]}
+
+    @app.post("/api/cameras/config")
+    async def camera_yaml_save(body: CameraYamlInput, u=Depends(admin)):
+        edge_only()
+        candidates = prepare_cameras(body.yaml)
+        for camera in candidates:
+            await save_camera(camera,u["username"])
+        return {"saved":[c.id for c in candidates],"yaml":export_cameras(store.all("camera"))}
+
+    @app.patch("/api/entities/{id}")
+    async def entity_rename(id: str, body: EntityNameInput, u=Depends(admin)):
+        edge_only()
+        entity = rt.entities.get(id)
+        if not entity:
+            raise HTTPException(404)
+        name = body.name.strip()
+        if not name:
+            raise ValueError("Name cannot be blank")
+        entity.update(name=name,friendly_name=name)
+        store.put("entity_settings",{**store.get("entity_settings",id,{}),"id":id,"friendly_name":name})
+        store.put("entity",entity)
+        store.event("entity_renamed",id,{"name":name},u["username"])
+        await rt.broadcast({"type":"refresh"})
+        return entity
+
+    @app.post("/api/entities/{id}/command")
+    async def entity_command(id: str, request: Request, u=Depends(user)):
+        edge_only()
+        body = await request.json()
+        if not isinstance(body,dict):
+            raise ValueError("Expected command options")
+        return await rt.entity_command(id,body,u["username"])
+
+    @app.put("/api/energy/{id}")
+    async def energy_profile(id: str, body: EnergyProfile, u=Depends(admin)):
+        edge_only()
+        entity = rt.entities.get(id)
+        if not entity or entity["type"] != "switch":
+            raise ValueError("Choose a relay")
+        rt.energy.observe(entity,force=True)
+        entity["energy_profile"] = body.model_dump()
+        store.put("entity_settings",{**store.get("entity_settings",id,{}),"id":id,"energy_profile":entity["energy_profile"]})
+        rt.energy.observe(entity)
+        store.put("entity",entity)
+        store.event("energy_profile_saved",id,{"watts":body.watts},u["username"])
+        await rt.broadcast({"type":"refresh"})
+        return {"ok":True}
+
+    @app.get("/api/energy")
+    async def energy_report(days: int = 30, u=Depends(user)):
+        edge_only()
+        if not 1 <= days <= 90:
+            raise ValueError("Choose 1..90 days")
+        return await asyncio.to_thread(rt.energy.report,list(rt.entities.values()),days,active=copy.deepcopy(rt.energy.active))
 
     @app.delete("/api/cameras/{id}")
     async def camera_delete(id: str, u=Depends(admin)):
@@ -350,13 +443,20 @@ def create_app(directory=None, mode=None):
         data = body.model_dump()
         data.update(id=id, api_key=store.seal(body.api_key) if body.api_key is not None else previous.get("api_key", ""))
         store.put("device", data)
+        for entity in rt.entities.values():
+            if entity.get("device_id") == id:
+                native = entity.get("native_name") or entity["name"].split(" · ")[-1]
+                entity.update(area=body.area,native_name=native)
+                entity["name"] = entity.get("friendly_name") or f"{body.name} · {native}"
+                store.put("entity",entity)
         if body.simulated:
             for key in range(1, body.relay_count + 1):
                 entity_id = f"switch.{id}_{key}"
                 rt.add_entity({"id": entity_id, "type": "switch", "name": f"{body.name} · Relay {key}", "area": body.area, "device_id": id, "key": key, "simulated": True})
                 await rt.set_state(entity_id, rt.entities[entity_id].get("state") is True, available=True, source="simulation")
         else:
-            rt.start_device(data)
+            if not previous or any(previous.get(field)!=data.get(field) for field in ("host","port","api_key")):
+                rt.start_device(data)
         store.event("device_saved", id, {"name": body.name}, u["username"])
         await rt.broadcast({"type": "refresh"})
         return {"id": id}
@@ -524,6 +624,8 @@ def create_app(directory=None, mode=None):
     async def export(u=Depends(admin)):
         edge_only()
         config = {"format": "luminext-site", "version": 1, "settings": rt.settings(), "cameras": rt.snapshot()["cameras"], "devices": rt.snapshot()["devices"], "automations": store.all("automation"), "mappings": {e["id"]: e.get("occupancy_sources", []) for e in rt.entities.values() if e["type"] == "switch"}}
+        config["entity_settings"] = {e["id"]:{k:e[k] for k in ("friendly_name","energy_profile") if k in e} for e in rt.entities.values() if e.get("friendly_name") or e.get("energy_profile")}
+        config["entity_catalog"] = [{k:e[k] for k in ("id","name","type","device_id","api_device_id","key","native_name","unit","device_class","capabilities","area") if k in e} for e in rt.entities.values() if e.get("device_id")]
         store.event("config_exported", "site", {"secrets_included": False}, u["username"])
         return Response(json.dumps(config, indent=2), media_type="application/json", headers={"Content-Disposition": 'attachment; filename="luminext-site.json"'})
 
@@ -554,6 +656,19 @@ def create_app(directory=None, mode=None):
             if device.api_key or (not device.simulated and not device.host):
                 raise ValueError("Real devices require a hostname; enter encryption keys locally after import")
         imported_settings = body.get("settings", {})
+        preferences = body.get("entity_settings",{})
+        if not isinstance(preferences,dict):
+            raise ValueError("Entity settings must be a mapping")
+        for id,preference in preferences.items():
+            ensure_id(id)
+            if not isinstance(preference,dict) or set(preference)-{"friendly_name","energy_profile"}:
+                raise ValueError("Invalid entity preference")
+            if "friendly_name" in preference:
+                EntityNameInput(name=preference["friendly_name"])
+            if "energy_profile" in preference:
+                if not id.startswith("switch."):
+                    raise ValueError("Energy profiles require relay entities")
+                preference["energy_profile"] = EnergyProfile.model_validate(preference["energy_profile"]).model_dump()
         if not isinstance(imported_settings, dict):
             raise ValueError("Invalid site settings")
         try:
@@ -580,6 +695,22 @@ def create_app(directory=None, mode=None):
             if d.simulated:
                 for key in range(1, d.relay_count + 1):
                     proposed[f"switch.{d.id}_{key}"] = {"type": "switch"}
+        from .esphome import DOMAINS,entity_id
+        catalog = body.get("entity_catalog",[])
+        if not isinstance(catalog,list) or len(catalog)>4096:
+            raise ValueError("Invalid entity catalog")
+        device_ids = {d.id for d in devices}
+        for entry in catalog:
+            if not isinstance(entry,dict) or entry.get("type") not in DOMAINS.values() or entry.get("device_id") not in device_ids:
+                raise ValueError("Unknown device/entity in catalog")
+            key,child = entry.get("key"),entry.get("api_device_id",0)
+            if not isinstance(key,int) or not isinstance(child,int) or not 0<=key<2**32 or not 0<=child<2**32:
+                raise ValueError("Invalid ESPHome entity key")
+            if entry.get("id") != entity_id(entry["type"],entry["device_id"],key,child):
+                raise ValueError("Entity ID must match its device/type/key")
+            if not isinstance(entry.get("capabilities",{}),dict):
+                raise ValueError("Invalid entity capabilities")
+            proposed[entry["id"]] = entry
         # Real relay keys remain discoverable from exports/mapping keys; never invent hardware keys.
         for id, sources in body.get("mappings", {}).items():
             ensure_id(id)
@@ -588,7 +719,7 @@ def create_app(directory=None, mode=None):
             int(id.rsplit("_", 1)[1])
             if not any(id.startswith(f"switch.{d.id}_") for d in devices):
                 raise ValueError("Unknown device in mapping")
-            if any(s not in proposed for s in sources):
+            if any(s not in proposed or proposed[s].get("type")!="occupancy_sensor" for s in sources):
                 raise ValueError("Unknown occupancy mapping")
             proposed[id] = {"type": "switch"}
         imported_rules = []
@@ -604,6 +735,10 @@ def create_app(directory=None, mode=None):
             await save_camera(camera, u["username"])
         for device in devices:
             await device_save(device, u)
+        for entry in catalog:
+            source_device = store.get("device",entry["device_id"])
+            allowed_fields = {"id","name","type","device_id","api_device_id","key","native_name","unit","device_class","capabilities","area"}
+            rt.add_entity({**{k:v for k,v in entry.items() if k in allowed_fields},"simulated":source_device["simulated"],"available":False,"state":"unknown","controllable":False})
         for id, sources in body.get("mappings", {}).items():
             if id not in rt.entities:
                 device_id, key = id.removeprefix("switch.").rsplit("_", 1)
@@ -613,6 +748,10 @@ def create_app(directory=None, mode=None):
             store.put("entity", rt.entities[id])
         for record, rule in rules:
             store.put("automation", {"id": ensure_id(record["id"]), "name": rule.get("alias", "Automation"), "yaml": record["yaml"], "rule": rule, "enabled": record.get("enabled", True), "updated_at": now()})
+        for id,preference in preferences.items():
+            store.put("entity_settings",{"id":id,**preference})
+            if id in rt.entities:
+                rt.add_entity({"id":id})
         if body.get("settings"):
             await settings_from_import(body["settings"])
         store.event("config_imported", "site", {}, u["username"])
@@ -694,8 +833,14 @@ def create_app(directory=None, mode=None):
             RelayInput.model_validate(data)
             if not any(e["id"] == data.get("entity_id") and e["type"] == "switch" for e in site["snapshot"]["entities"]):
                 raise ValueError("Unknown site relay")
+        elif kind == "entity":
+            from .esphome import validate_command
+            entity = next((e for e in site["snapshot"]["entities"] if e["id"]==data.get("entity_id")),None)
+            if not entity or not isinstance(data.get("options"),dict):
+                raise ValueError("Unknown entity or invalid command options")
+            validate_command(entity,data["options"])
         else:
-            raise ValueError("Supported cloud commands: relay and automation")
+            raise ValueError("Supported cloud commands: relay, entity and automation")
         command = {"id": uid("cmd"), "site_id": id, "kind": kind, "data": data, "actor": u["username"], "created": now(), "expires": now() + 30, "status": "pending"}
         store.put("cloud_command", command)
         store.event("remote_command_queued", id, {"command_id": command["id"], "kind": kind}, u["username"])
@@ -780,6 +925,13 @@ def create_app(directory=None, mode=None):
         rt.frames[id] = (now(), data)
         return {"ok": True}
 
+    @app.get("/api/cameras/{id}/detections")
+    async def detection_boxes(id: str, u=Depends(user)):
+        result = rt.detections.get(id)
+        if not result or now()-result["observed_at"] > 2:
+            return {"camera_id":id,"detections":[],"observed_at":now()}
+        return result
+
     @app.get("/api/cameras/{id}/snapshot")
     async def snapshot(id: str, u=Depends(user)):
         frame = rt.frames.get(id)
@@ -799,8 +951,8 @@ def create_app(directory=None, mode=None):
                 if frame and frame[0] > previous and now() - frame[0] < 10:
                     previous = frame[0]
                     yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame[1] + b"\r\n"
-                await asyncio.sleep(.2)
-        return StreamingResponse(stream(), media_type="multipart/x-mixed-replace; boundary=frame")
+                await asyncio.sleep(.02)
+        return StreamingResponse(stream(), media_type="multipart/x-mixed-replace; boundary=frame",headers={"X-Accel-Buffering":"no","Cache-Control":"no-store"})
 
     @app.get("/healthz")
     async def healthz():

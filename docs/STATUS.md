@@ -2,6 +2,8 @@
 
 This file distinguishes implemented behavior from testing still needed. It is not a production certification.
 
+Version 0.2.0 adds friendly entity names, camera YAML configuration, broader ESPHome entity support, separate preview/inference queues, visible person boxes/logout and baseline-based runtime/energy estimates. The suite now has 34 passing tests plus browser checks using simulated RHT/camera data. See V0_2_GUIDE.md. The camera RTSP port was unreachable during this update; actual preview smoothness and RHT hardware behavior still need commissioning. The table below retains the original commissioning baseline where not explicitly superseded by this update.
+
 Version 0.1.1 update: one real RTSP camera now supplies live frames and detection results on the Windows development host. Native detection is automatically supervised, a Windows FFmpeg fallback is installed, and the RTSP timeout compatibility issue is fixed. The owner reports a real ESPHome switch is working. The original verification limits below still apply to the full N95 installation, Linux/GPU deployment and WebRTC. See TEST_REPORT.md for the new camera evidence and 20 passing tests.
 
 | Area | Implemented | Verification / limit |

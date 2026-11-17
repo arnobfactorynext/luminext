@@ -1,6 +1,7 @@
 """Supervise the separate detection process for native desktop installations."""
 import asyncio
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -37,7 +38,10 @@ class DetectionSupervisor:
             self.rt.detection_status = {"status": "idle", "message": "Waiting for an enabled camera with an RTSP URL"}
             return
         missing = [m for m in ("openvino", "cv2", "numpy") if importlib.util.find_spec(m) is None]
-        model = Path(os.getenv("LUMINEXT_MODEL", "models/person-detection-retail-0013.xml")).resolve()
+        profile_path = self.rt.store.directory / "detection-settings.json"
+        profile = json.loads(profile_path.read_text()) if profile_path.exists() else {}
+        model = Path(os.getenv("LUMINEXT_MODEL") or profile.get("model", "models/person-detection-retail-0013.xml")).resolve()
+        label = int(os.getenv("LUMINEXT_PERSON_LABEL", str(profile.get("person_label", 1))))
         if missing or not model.is_file():
             message = "Missing detection packages: " + ", ".join(missing) if missing else "Person detection model is missing; run tools/download_model.py"
             self.rt.detection_status = {"status": "blocked", "message": message}
@@ -55,7 +59,7 @@ class DetectionSupervisor:
             log_path.write_text("")
         self.log = log_path.open("ab", buffering=0)
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        command = [sys.executable, "-m", "luminext.worker", "--data", str(self.rt.store.directory.resolve()), "--api", os.getenv("LUMINEXT_API", "http://127.0.0.1:8000"), "--model", str(model), "--device", os.getenv("LUMINEXT_INFERENCE_DEVICE", "GPU"), "--ffmpeg", ffmpeg]
+        command = [sys.executable, "-m", "luminext.worker", "--data", str(self.rt.store.directory.resolve()), "--api", os.getenv("LUMINEXT_API", "http://127.0.0.1:8000"), "--model", str(model), "--person-label", str(label), "--device", os.getenv("LUMINEXT_INFERENCE_DEVICE", "GPU"), "--ffmpeg", ffmpeg]
         self.process = await asyncio.create_subprocess_exec(*command, cwd=Path(__file__).resolve().parent.parent, stdout=self.log, stderr=self.log, creationflags=flags)
         self.rt.detection_status = {"status": "starting", "message": "Starting camera worker; first frames may take a few seconds"}
 

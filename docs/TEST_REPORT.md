@@ -1,5 +1,15 @@
 # Development verification
 
+## Version 0.2.0 verification on 1 November 2026
+
+- Full suite: **34 passed** in 24.60 seconds. After final input-validation hardening, targeted camera/config round-trip checks also passed. The existing Starlette/httpx test-client deprecation warning remains non-fatal.
+- Added checks for persisted friendly names, YAML redaction/batch validation, unchanged-camera state preservation, RHT numeric/text/binary readings, missing/NaN state, momentary button semantics, bounded commands/bridged identities, entity-catalog/name/profile/rule round-trip, energy gaps/manual-origin attribution/overnight schedules/negative net delta, stale boxes, and independent preview under an 800 ms slow inference.
+- Browser QA: edited a sensor name, added a camera through Validate & apply YAML, configured a 100 W/10 BDT-per-kWh simulated load and verified it produced no savings, displayed a Person 95% test box, sent a simulated IR button command without inventing AC state, and used the visible Log out button successfully.
+- All browser fixtures are in the ignored `data/qa-v02` workspace, separate from the installation's device credentials and configuration. Actual RHT firmware credentials from chat were not copied into source or fixtures.
+- The RTSP port for Cam 102 was unreachable from the laptop, so this version's real-stream latency/overlay could not be benchmarked. RHT physical I/O, Linux/WebRTC and N95 load remain unverified.
+
+The sections below describe earlier releases, not a claim that their counts/limitations are the current suite.
+
 ## Camera connection fix in version 0.1.1
 
 After the initial test run, the owner configured one real camera. Its RTSP TCP port was reachable and OpenCV decoded a 1920×1080 frame, confirming the saved URL worked. LumiNext initially showed it offline because the native app had no running detection worker, Windows lacked FFmpeg, and the packaged FFmpeg rejected the original `rw_timeout` RTSP option.
@@ -42,3 +52,13 @@ Model download URLs, sizes and SHA-256 fingerprints are stored in `models/downlo
 ## Unverified paths
 
 No real RTSP cameras or ESPHome switches were available for this test session. The 12-camera/5-fps workload, physical relay operations, Intel iGPU/VAAPI, go2rtc/WebRTC, long-duration operation, full target-host restore, power-loss recovery and external cloud deployment remain to be verified. Docker Desktop's Linux engine was unavailable, so Linux images were not built or run here. See STATUS.md for the commissioning sequence.
+
+Final local application check: three targeted ESPHome/name/command tests passed after the last hardening changes; JavaScript syntax and git diff whitespace checks passed. Mobile Devices page had matching viewport/document widths (375 px). Desktop simulation screenshot: `v02-devices-preview.jpg`. Production SQLite backup passed integrity checking before restart; the updated edge server returned healthy, preserved the existing account, camera and device, and migrated to schema 2. Camera YAML and energy routes required authentication. Additional native entities were discovered after reconnect. Physical camera latency and RHT hardware remain unverified.
+
+Detection update v0.2.1: the full suite passed 40 tests in 25.80 seconds. JavaScript syntax and diff whitespace checks passed. The alternate model downloader passed its real checksum/download smoke check. See DETECTION_REVIEW_2026_11_01.md for the 30-minute baseline, applied model/threshold/delay, and live validation limits.
+
+Follow-up after controlled room tests: both tested models produced chair false positives at lower thresholds. The alternate model was rejected. Original model restored with 0.85 starting confidence and three consecutive per-person confirmations; weak or missing observations reset pending confirmation streaks. Full suite: 42 passed in 26.71 seconds; final targeted detection suite: 8 passed. Final real empty-room/re-entry verification remains pending.
+
+Final controlled test passed: clear at 33.87 seconds after test start; all four target relays reported OFF and overrides released; occupied returned at 87.99 seconds on re-entry. Corrected an already-OFF relay causing a misleading confirmation timeout. Full suite: 43 passed in 26.08 seconds. Reporting fix deployed after database backup; live physical transitions were verified before this final restart.
+
+Ten-minute recheck: 600 state samples, 245 UI samples, 30 zero-box samples; no occupancy transitions or automation runs. Fixed transient publication failures restarting RTSP capture/tracking. Full suite 46 passed in 25.61 seconds. Pose/occlusion misses remain an acknowledged limitation; see DETECTION_RECHECK_10_MINUTES.md.

@@ -31,6 +31,7 @@ class Runtime:
         self.samples = defaultdict(lambda: {"present": 0, "absent": 0, "empty_since": None})
         self.camera_seen = {}
         self.metrics = {}
+        self.detections = {}
         self.drivers = {}
         self.device_tasks = {}
         self.locks = defaultdict(asyncio.Lock)
@@ -39,6 +40,8 @@ class Runtime:
         self.started = now()
         self.detection_status = {"status": "not_started", "message": "Camera worker has not started"}
         self.engine = RuleEngine(self)
+        from .energy import EnergyTracker
+        self.energy = EnergyTracker(store)
         self.cloud_status = {"connected": False, "message": "Not connected"}
         if not store.get("settings", "site"):
             store.put("settings", {"id": "site", "name": "LumiNext Factory", "timezone": "Asia/Dhaka", "history_days": 30})
@@ -70,6 +73,7 @@ class Runtime:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        self.energy.flush(self.entities.values())
 
     async def broadcast(self, message):
         for queue in list(self.clients):
@@ -85,13 +89,18 @@ class Runtime:
         old = entity.get("state")
         old_available = entity.get("available")
         old_count = entity.get("count")
+        old_details = entity.get("state_attributes")
         entity.update(attributes)
+        if entity["type"] == "switch" and attributes.get("source") in {"manual","automation"}:
+            entity["control_source"] = attributes["source"]
         entity["state"] = state
         entity["observed_at"] = now()
+        if entity["type"] == "switch":
+            self.energy.observe(entity)
         if old != state:
             entity["last_changed"] = now()
             self.store.event("state", id, {"from": old, "to": state, "source": attributes.get("source", "device")})
-        if old != state or old_available != entity.get("available"):
+        if old != state or old_available != entity.get("available") or old_details != entity.get("state_attributes"):
             self.store.put("entity", entity)
         if old != state or old_available != entity.get("available") or old_count != entity.get("count"):
             await self.broadcast({"type": "entity", "entity": entity})
@@ -100,7 +109,10 @@ class Runtime:
 
     def add_entity(self, entity):
         existing = self.entities.get(entity["id"], {})
-        self.entities[entity["id"]] = {"state": "unknown", "available": False, "last_changed": now(), **existing, **entity}
+        preferences = self.store.get("entity_settings",entity["id"],{})
+        self.entities[entity["id"]] = {"state": "unknown", "available": False, "last_changed": now(), **existing, **entity, **preferences}
+        if self.entities[entity["id"]].get("friendly_name"):
+            self.entities[entity["id"]]["name"] = self.entities[entity["id"]]["friendly_name"]
         self.store.put("entity", self.entities[entity["id"]])
 
     def camera_entities(self, camera):
@@ -116,9 +128,15 @@ class Runtime:
                 del self.entities[id]
 
     async def occupancy(self, camera, detections, metrics=None):
+        previous_seen = self.camera_seen.get(camera["id"])
+        interrupted = previous_seen is not None and now()-previous_seen > max(2, 3/camera.get("fps", 5))
         self.camera_seen[camera["id"]] = now()
         self.metrics[camera["id"]] = {**(metrics or {}), "received_at": now()}
-        boxes = [d for d in detections if d.get("score", 0) >= camera.get("threshold", .5)]
+        self.detections[camera["id"]] = {"camera_id":camera["id"],"detections":detections,"observed_at":now()}
+        await self.broadcast({"type":"detections", **self.detections[camera["id"]]})
+        from .tracking import retention_threshold
+        threshold = camera.get("threshold", .5)
+        boxes = [d for d in detections if d.get("score", 0) >= (retention_threshold(threshold) if d.get("track_id") else threshold)]
         changes = []
         for entity in list(self.entities.values()):
             if entity.get("camera_id") != camera["id"]:
@@ -127,6 +145,8 @@ class Runtime:
             selected = boxes if not zone else [d for d in boxes if inside(((d["box"][0] + d["box"][2]) / 2, d["box"][3]), zone["points"])]
             present = bool(selected)
             sample = self.samples[entity["id"]]
+            if interrupted:
+                sample.update(present=0, absent=0, empty_since=None)
             sample["present"] = sample["present"] + 1 if present else 0
             sample["absent"] = 0 if present else sample["absent"] + 1
             sample["empty_since"] = None if present else (sample["empty_since"] or now())
@@ -157,6 +177,7 @@ class Runtime:
             if sources and all(s in self.entities and self.entities[s].get("available") and self.entities[s]["state"] is False for s in required_sources):
                 entity["override"] = False
                 entity.pop("override_since", None)
+                self.energy.observe(entity)
                 self.store.put("entity", entity)
                 self.store.event("override_released", entity["id"], {"reason": "all_mapped_occupancy_clear"})
                 await self.broadcast({"type": "entity", "entity": entity})
@@ -177,6 +198,7 @@ class Runtime:
             target = not entity["state"] if action == "toggle" else action == "turn_on"
             if manual:
                 entity.update(override=True, override_since=now())
+                self.energy.observe(entity)
                 self.store.put("entity", entity)
             self.store.event("relay_command", id, {"target": target, "manual": manual}, actor)
             if entity.get("simulated"):
@@ -185,72 +207,135 @@ class Runtime:
                 client = self.drivers.get(entity["device_id"])
                 if not client:
                     raise ValueError("ESPHome is disconnected")
+                if entity.get('state') is target:
+                    # ESPHome may not emit an unchanged state again. This is a
+                    # known subscribed state, not a new command confirmation.
+                    self.store.put('entity', entity)
+                    await self.broadcast({'type': 'entity', 'entity': entity})
+                    return {'result': 'already_in_state', 'state': target, 'sent': False}
                 # Wait for an actual state subscription update. Never paint an optimistic success.
                 event = asyncio.Event()
-                self.expected[id] = {"state": target, "event": event, "expires": now() + 5}
+                self.expected[id] = {"state": target, "event": event, "expires": now() + 5,"source":"manual" if manual else "automation"}
                 try:
-                    client.switch_command(entity["key"], target)
+                    if entity.get("api_device_id"):
+                        client.switch_command(entity["key"], target, device_id=entity["api_device_id"])
+                    else:
+                        client.switch_command(entity["key"], target)
                     await asyncio.wait_for(event.wait(), 5)
                 except asyncio.TimeoutError as e:
                     raise ValueError("No confirmed state received from ESPHome within 5 seconds") from e
+                except Exception:
+                    raise ValueError("ESPHome relay command failed; check device availability") from None
                 finally:
                     self.expected.pop(id, None)
+            self.store.put("entity",entity)
             await self.broadcast({"type": "entity", "entity": entity})
             return {"result": "confirmed", "state": target}
 
-    async def device_state(self, device_id, key, state):
-        id = f"switch.{device_id}_{key}"
+    async def device_state(self, device_id, key, state, child=0):
+        from .esphome import entity_id
+        id = entity_id("switch",device_id,key,child)
         if id not in self.entities:
             return
         entity = self.entities[id]
         expected = self.expected.get(id)
         initial = not entity.get("available") or entity.get("state") == "unknown"
         if expected and state == expected["state"]:
+            entity["control_source"] = expected.get("source","unattributed")
             expected["event"].set()
         elif not initial and entity["state"] != state:
+            entity["control_source"] = "manual"
             entity.update(override=True, override_since=now())
             self.store.event("physical_override", id, {"state": state})
+        elif initial:
+            entity["control_source"] = "unattributed"
         await self.set_state(id, state, available=True, source="esphome")
 
     def start_device(self, device):
         if device.get("simulated") or self.mode != "edge":
             return
         old = self.device_tasks.get(device["id"])
-        if old:
-            old.cancel()
-        self.device_tasks[device["id"]] = asyncio.create_task(self.device_loop(device))
+        async def replace():
+            if old:
+                old.cancel()
+                await asyncio.gather(old, return_exceptions=True)
+            await self.device_loop(device)
+        self.device_tasks[device["id"]] = asyncio.create_task(replace())
+
+    async def entity_command(self, id, data, actor):
+        from .esphome import validate_command
+        entity = self.entities.get(id)
+        if not entity or not entity.get("available"):
+            raise ValueError("Entity is unavailable")
+        method, args = validate_command(entity,data)
+        if entity.get("simulated"):
+            if entity["type"] != "button":
+                value = args.get("state",args.get("position",args.get("target_temperature",entity["state"])))
+                await self.set_state(id,value,source="simulation",available=True)
+            self.store.event("entity_command",id,{"options":data,"result":"simulated"},actor)
+            return {"result":"simulated","note":"Simulated command only; no physical device was controlled"}
+        client = self.drivers.get(entity["device_id"])
+        if not client:
+            raise ValueError("ESPHome is disconnected")
+        try:
+            getattr(client,method)(**args)
+        except Exception:
+            raise ValueError("ESPHome command failed; check device availability") from None
+        self.store.event("entity_command",id,{"options": data,"result":"sent"},actor)
+        # Buttons/IR transmitters have no physical load feedback. Do not claim an AC is on.
+        return {"result":"sent","note":"Await state feedback where supported; button presses do not confirm the physical appliance state"}
+
+    async def generic_device_state(self, device_id, state):
+        from .esphome import decode
+        decoded = decode(device_id,state)
+        if not decoded:
+            return
+        id,value,details,available = decoded
+        if id not in self.entities:
+            return
+        if self.entities[id]["type"] == "switch":
+            if available:
+                await self.device_state(device_id,state.key,value,state.device_id)
+            else:
+                await self.set_state(id,"unknown",available=False,source="esphome")
+        else:
+            await self.set_state(id,value,available=available,source="esphome",state_attributes=details)
 
     async def device_loop(self, device):
-        from aioesphomeapi import APIClient, SwitchInfo, SwitchState
+        from aioesphomeapi import APIClient
+        from .esphome import describe, decode
 
         while True:
             client = None
             pending = set()
             disconnected = asyncio.Event()
             try:
+                device = self.store.get("device",device["id"],device)
                 client = APIClient(device["host"], device.get("port", 6053), password=None, noise_psk=self.store.unseal(device.get("api_key", "")) or None)
                 async def on_stop(expected):
                     disconnected.set()
                 await client.connect(on_stop=on_stop, login=True, log_errors=False)
                 infos, _ = await client.list_entities_services()
                 allowed = set(device.get("relay_keys", []))
+                registered = set()
                 for info in infos:
-                    if not isinstance(info, SwitchInfo):
-                        continue
-                    # Factory reset is exposed as a switch in this firmware; never register it as a load.
-                    if info.entity_category or "reset" in (info.name + info.object_id).lower():
-                        continue
-                    if allowed and info.key not in allowed:
-                        continue
-                    self.add_entity({"id": f"switch.{device['id']}_{info.key}", "name": f"{device['name']} · {info.name}", "type": "switch", "device_id": device["id"], "key": info.key, "area": device["area"], "simulated": False})
+                    entity = describe(device,info)
+                    if entity and not (entity["type"] == "switch" and allowed and info.key not in allowed):
+                        self.add_entity(entity)
+                        registered.add(entity["id"])
                 self.drivers[device["id"]] = client
 
                 def receive(state):
-                    if isinstance(state, SwitchState):
-                        task = asyncio.create_task(self.device_state(device["id"], state.key, state.state))
-                        pending.add(task)
-                        task.add_done_callback(pending.discard)
+                    mapped = decode(device["id"],state)
+                    if not mapped or mapped[0] not in registered:
+                        return
+                    task = asyncio.create_task(self.generic_device_state(device["id"],state))
+                    pending.add(task)
+                    task.add_done_callback(pending.discard)
                 client.subscribe_states(receive)
+                for entity in list(self.entities.values()):
+                    if entity["id"] in registered and entity["type"] == "button":
+                        await self.set_state(entity["id"], "ready", available=True, source="esphome")
                 self.store.event("device_online", device["id"], {})
                 await self.broadcast({"type": "refresh"})
                 await disconnected.wait()
@@ -279,6 +364,7 @@ class Runtime:
         while True:
             try:
                 if self.mode == "edge":
+                    self.energy.tick(self.entities.values())
                     for camera in self.store.all("camera"):
                         if camera["simulated"]:
                             continue
@@ -291,6 +377,8 @@ class Runtime:
                 if now() - last_backup > 86400:
                     self.store.backup()
                     self.store.prune(self.settings().get("history_days", 30))
+                    self.store.db.execute("DELETE FROM energy_intervals WHERE end<?",(now()-90*86400,))
+                    self.store.db.commit()
                     last_backup = now()
             except Exception:
                 log.exception("Maintenance failed")
@@ -314,7 +402,7 @@ class Runtime:
                 message = "No fresh detection frames yet. Check the worker status, RTSP credentials and network reachability."
             camera["connection_message"] = message
         devices = [{k: v for k, v in d.items() if k != "api_key"} | {"has_key": bool(d.get("api_key"))} for d in self.store.all("device")]
-        return {"mode": self.mode, "settings": self.settings(), "cameras": cameras, "devices": devices, "entities": list(self.entities.values()), "automations": self.store.all("automation"), "events": self.store.history(limit=80), "health": {"cpu_percent": psutil.cpu_percent(), "memory_percent": psutil.virtual_memory().percent, "memory_used_gb": round(psutil.virtual_memory().used / 1024**3, 1), "uptime_seconds": int(now() - self.started), "detection_connected": any(now() - t < 10 for t in self.camera_seen.values()), "detection_service": self.detection_status, "cloud": self.cloud_status, "inference_device": next((m.get("device") for m in self.metrics.values() if m.get("device")), "Not connected"), "version": "0.1.1"}}
+        return {"mode": self.mode, "settings": self.settings(), "cameras": cameras, "devices": devices, "entities": list(self.entities.values()), "automations": self.store.all("automation"), "events": self.store.history(limit=80), "health": {"cpu_percent": psutil.cpu_percent(), "memory_percent": psutil.virtual_memory().percent, "memory_used_gb": round(psutil.virtual_memory().used / 1024**3, 1), "uptime_seconds": int(now() - self.started), "detection_connected": any(now() - t < 10 for t in self.camera_seen.values()), "detection_service": self.detection_status, "cloud": self.cloud_status, "inference_device": next((m.get("device") for m in self.metrics.values() if m.get("device")), "Not connected"), "version": "0.2.1"}}
 
     async def cloud_loop(self):
         async with httpx.AsyncClient(timeout=15) as client:
@@ -351,6 +439,8 @@ class Runtime:
         kind, data = command["kind"], command["data"]
         if kind == "relay":
             return await self.command_switch(data["entity_id"], data["action"], "cloud:" + command["actor"], manual=True)
+        if kind == "entity":
+            return await self.entity_command(data["entity_id"],data["options"],"cloud:"+command["actor"])
         if kind == "automation":
             from .rules import parse_rule
             rule = parse_rule(data["yaml"], self.entities)

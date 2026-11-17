@@ -4,4 +4,4 @@ Set-Location -LiteralPath $PSScriptRoot
 if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
     throw 'Create .venv and install requirements.txt first. See README.md.'
 }
-& '.\.venv\Scripts\python.exe' -m luminext --mode cloud --host 127.0.0.1 --port 8001 --data data/cloud
+& '.\.venv\Scripts\python.exe' -m luminext --mode cloud --host 127.0.0.1 --port 8001 --data (Join-Path $PSScriptRoot 'data\cloud')

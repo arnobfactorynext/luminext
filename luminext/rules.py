@@ -72,8 +72,8 @@ def parse_rule(text, entities):
         elif kind in {"state", "numeric_state"}:
             keys(item, {"condition", "entity_id", "state"} if kind == "state" else {"condition", "entity_id", "above", "below"})
             entity_ids(item)
-            if kind == "state" and str(item.get("state")).lower() not in {"on", "off", "unknown", "unavailable", "true", "false"}:
-                raise RuleError("State must be on/off/unknown/unavailable")
+            if kind == "state" and ("state" not in item or isinstance(item["state"],(dict,list))):
+                raise RuleError("Provide a scalar entity state")
             if kind == "numeric_state":
                 numeric(item)
         elif kind == "time":
@@ -111,13 +111,19 @@ def parse_rule(text, entities):
             else:
                 keys(action, {"service", "action", "target", "entity_id", "data"})
                 service = action.get("service", action.get("action"))
-                if service not in {"switch.turn_on", "switch.turn_off", "switch.toggle", "luminext.notify"}:
+                if service not in {"switch.turn_on", "switch.turn_off", "switch.toggle", "luminext.notify", "button.press", "luminext.entity_command"}:
                     raise RuleError(f"Unsupported action: {service}")
                 if service.startswith("switch."):
                     target = action.get("target", action)
                     for id in entity_ids(target):
                         if entities[id]["type"] != "switch":
                             raise RuleError(f"Not a switch: {id}")
+                elif service in {"button.press","luminext.entity_command"}:
+                    from .esphome import validate_command
+                    for id in entity_ids(action.get("target",action)):
+                        if service == "button.press" and entities[id]["type"] != "button":
+                            raise RuleError("button.press requires a button entity")
+                        validate_command(entities[id],{} if service == "button.press" else action.get("data",{}))
     try:
         for t in rule["trigger"]:
             platform = t.get("platform", t.get("trigger"))
@@ -293,6 +299,12 @@ class RuleEngine:
                     message = str(action.get("data", {}).get("message", "Automation notification"))[:1000]
                     self.rt.store.event("notification", "system", {"message": message})
                     steps.append({"notification": message})
+                elif service in {"button.press","luminext.entity_command"}:
+                    ids = as_list(action.get("target",action)["entity_id"])
+                    data = {} if service == "button.press" else action.get("data",{})
+                    for id in ids:
+                        result = await self.rt.entity_command(id,data,"automation")
+                        steps.append({"entity_id":id,**result})
                 else:
                     ids = as_list(action.get("target", action)["entity_id"])
                     results = await asyncio.gather(*(self.rt.command_switch(id, service.split(".")[1], "automation") for id in ids))
